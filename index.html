@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+<title>AR Карта Космоса</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #fff;
+    font-family: -apple-system, system-ui, sans-serif; }
+  #video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 0; }
+  #scene { position: fixed; inset: 0; z-index: 1; }
+  #hud { position: fixed; inset: 0; z-index: 2; pointer-events: none; font-size: 12px; }
+  #info { position: absolute; top: 10px; left: 10px; padding: 6px 10px;
+    background: rgba(0,0,0,0.65); border-radius: 6px; line-height: 1.5; }
+  #controls { position: absolute; bottom: 10px; left: 10px; right: 10px;
+    pointer-events: auto; display: none; padding: 8px 12px;
+    background: rgba(0,0,0,0.65); border-radius: 8px; }
+  input[type=range] { width: 100%; margin-top: 4px; }
+  #startBtn { position: fixed; inset: 0; z-index: 10; background: radial-gradient(circle at 50% 40%, #1a2244, #000);
+    border: none; color: #fff; font-size: 16px; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px; cursor: pointer; padding: 24px; }
+  #startBtn .icon { font-size: 72px; filter: drop-shadow(0 0 20px #88aaff); }
+  #startBtn .title { font-size: 20px; font-weight: 600; }
+  #startBtn .sub { font-size: 12px; opacity: 0.7; max-width: 300px; text-align: center; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<video id="video" autoplay playsinline muted></video>
+<canvas id="scene"></canvas>
+
+<div id="hud">
+  <div id="info">Инициализация...</div>
+  <div id="controls">
+    <label>Калибровка компаса: <span id="calVal">0</span>°</label>
+    <input type="range" id="cal" min="-180" max="180" value="0" step="1">
+  </div>
+</div>
+
+<button id="startBtn">
+  <div class="icon">🌟</div>
+  <div class="title">AR-карта неба</div>
+  <div class="sub">Нажмите, чтобы разрешить камеру, геолокацию и датчики.<br>Затем наведите телефон на небо.</div>
+</button>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+const RAD = Math.PI / 180;
+const DEG = 180 / Math.PI;
+
+// =================== Геолокация ===================
+let lat = 50.45, lon = 30.52;
+navigator.geolocation?.getCurrentPosition(
+  p => { lat = p.coords.latitude; lon = p.coords.longitude; },
+  () => {}
+);
+
+// =================== Астрономия ===================
+function julianDate(date) { return date.getTime() / 86400000 + 2440587.5; }
+
+function gmstDeg(jd) {
+  const d = jd - 2451545.0;
+  return ((280.46061837 + 360.98564736629 * d) % 360 + 360) % 360;
+}
+
+function eclToEq(lonDeg, latDeg, jd) {
+  const d = jd - 2451545.0;
+  const obl = (23.439291 - 0.0000004 * d) * RAD;
+  const lon = lonDeg * RAD, lat = latDeg * RAD;
+  const x = Math.cos(lat) * Math.cos(lon);
+  const y = Math.cos(lat) * Math.sin(lon);
+  const z = Math.sin(lat);
+  const yEq = y * Math.cos(obl) - z * Math.sin(obl);
+  const zEq = y * Math.sin(obl) + z * Math.cos(obl);
+  return {
+    ra: Math.atan2(yEq, x) * DEG,
+    dec: Math.atan2(zEq, Math.sqrt(x*x + yEq*yEq)) * DEG
+  };
+}
+
+function sunPosition(jd) {
+  const n = jd - 2451545.0;
+  const L = ((280.460 + 0.9856474 * n) % 360 + 360) % 360;
+  const g = ((((357.528 + 0.9856003 * n) % 360) + 360) % 360) * RAD;
+  const lambda = L + 1.915 * Math.sin(g) + 0.020 * Math.sin(2*g);
+  return eclToEq(lambda, 0, jd);
+}
+
+function moonPosition(jd) {
+  const d = jd - 2451543.5;
+  const N = (125.1228 - 0.0529538083 * d) * RAD;
+  const i = 5.1454 * RAD;
+  const w = (318.0634 + 0.1643573223 * d) * RAD;
+  const a = 60.2666, e = 0.054900;
+  const M = (115.3654 + 13.0649929509 * d) * RAD;
+  let E = M + e * Math.sin(M);
+  for (let k = 0; k < 8; k++) E -= (E - e * Math.sin(E) - M) / (1 - e * Math.cos(E));
+  const xv = a * (Math.cos(E) - e);
+  const yv = a * Math.sqrt(1 - e*e) * Math.sin(E);
+  const v = Math.atan2(yv, xv);
+  const r = Math.sqrt(xv*xv + yv*yv);
+  const xh = r * (Math.cos(N)*Math.cos(v+w) - Math.sin(N)*Math.sin(v+w)*Math.cos(i));
+  const yh = r * (Math.sin(N)*Math.cos(v+w) + Math.cos(N)*Math.sin(v+w)*Math.cos(i));
+  const zh = r * Math.sin(v+w) * Math.sin(i);
+  return eclToEq(Math.atan2(yh, xh) * DEG, Math.atan2(zh, Math.sqrt(xh*xh + yh*yh)) * DEG, jd);
+}
+
+// Планеты (простые кеплеровские элементы J2000)
+const PLANETS = [
+  { name: 'Меркурий', a: 0.38710, e: 0.20563, i: 7.005, O: 48.331, w: 29.124, L: 252.251, n: 4.09233445, color: 'rgba(200,200,200,1)', sz: 3 },
+  { name: 'Венера',   a: 0.72333, e: 0.00677, i: 3.395, O: 76.680, w: 54.884, L: 181.980, n: 1.60213034, color: 'rgba(255,240,200,1)', sz: 5 },
+  { name: 'Марс',     a: 1.52368, e: 0.09340, i: 1.850, O: 49.558, w: 286.502, L: 355.433, n: 0.52402068, color: 'rgba(255,120,80,1)', sz: 4 },
+  { name: 'Юпитер',   a: 5.20260, e: 0.04849, i: 1.303, O: 100.464, w: 273.867, L: 34.351, n: 0.08308529, color: 'rgba(255,220,170,1)', sz: 6 },
+  { name: 'Сатурн',   a: 9.55491, e: 0.05551, i: 2.489, O: 113.665, w: 339.392, L: 50.077, n: 0.03344414, color: 'rgba(230,210,180,1)', sz: 5 }
+];
+const EARTH = { a: 1.0, e: 0.01671, i: 0.0, O: 0.0, w: 102.937, L: 100.464, n: 0.98560911 };
+
+function heliocentric(el, jd) {
+  const d = jd - 2451545.0;
+  const M = (el.L - el.O - el.w + el.n * d) * RAD;
+  let E = M + el.e * Math.sin(M);
+  for (let k = 0; k < 8; k++) E -= (E - el.e * Math.sin(E) - M) / (1 - el.e * Math.cos(E));
+  const xv = el.a * (Math.cos(E) - el.e);
+  const yv = el.a * Math.sqrt(1 - el.e*el.e) * Math.sin(E);
+  const v = Math.atan2(yv, xv);
+  const r = Math.sqrt(xv*xv + yv*yv);
+  const Or = el.O * RAD, ir = el.i * RAD, wr = el.w * RAD;
+  return {
+    x: r * (Math.cos(Or)*Math.cos(v+wr) - Math.sin(Or)*Math.sin(v+wr)*Math.cos(ir)),
+    y: r * (Math.sin(Or)*Math.cos(v+wr) + Math.cos(Or)*Math.sin(v+wr)*Math.cos(ir)),
+    z: r * Math.sin(v+wr) * Math.sin(ir)
+  };
+}
+
+function planetRAdec(p, jd) {
+  const pl = heliocentric(p, jd);
+  const e = heliocentric(EARTH, jd);
+  const x = pl.x - e.x, y = pl.y - e.y, z = pl.z - e.z;
+  return eclToEq(Math.atan2(y, x) * DEG, Math.atan2(z, Math.sqrt(x*x + y*y)) * DEG, jd);
+}
+
+function radecToAltAz(raDeg, decDeg, latDeg, lonDeg, jd) {
+  const lst = (gmstDeg(jd) + lonDeg) % 360;
+  const HA = (((lst - raDeg + 540) % 360) - 180) * RAD;
+  const dec = decDeg * RAD, la = latDeg * RAD;
+  const sinAlt = Math.sin(dec)*Math.sin(la) + Math.cos(dec)*Math.cos(la)*Math.cos(HA);
+  const alt = Math.asin(Math.max(-1, Math.min(1, sinAlt)));
+  const denom = Math.cos(alt) * Math.cos(la) || 1e-9;
+  const cosAz = (Math.sin(dec) - Math.sin(alt)*Math.sin(la)) / denom;
+  let az = Math.acos(Math.max(-1, Math.min(1, cosAz)));
+  if (Math.sin(HA) > 0) az = 2*Math.PI - az;
+  return { alt: alt * DEG, az: az * DEG };
+}
+
+function altAzToVec(altDeg, azDeg, r) {
+  const alt = altDeg * RAD, az = azDeg * RAD;
+  return new THREE.Vector3(
+    r * Math.cos(alt) * Math.sin(az),
+    r * Math.sin(alt),
+   -r * Math.cos(alt) * Math.cos(az)
+  );
+}
+
+// =================== Каталог ярких звёзд ===================
+const STARS = [
+  ['Сириус', 101.287, -16.716, -1.46], ['Канопус', 95.988, -52.696, -0.74],
+  ['Арктур', 213.915, 19.182, -0.05],  ['Вега', 279.235, 38.784, 0.03],
+  ['Капелла', 79.172, 45.998, 0.08],   ['Ригель', 78.634, -8.202, 0.13],
+  ['Процион', 114.825, 5.225, 0.34],   ['Бетельгейзе', 88.793, 7.407, 0.50],
+  ['Ахернар', 24.429, -57.237, 0.46],  ['Хадар', 210.956, -60.373, 0.61],
+  ['Альтаир', 297.696, 8.868, 0.77],   ['Акрукс', 186.650, -63.099, 0.77],
+  ['Альдебаран', 68.980, 16.509, 0.85],['Антарес', 247.352, -26.432, 1.09],
+  ['Спика', 201.298, -11.161, 0.98],   ['Поллукс', 116.329, 28.026, 1.14],
+  ['Фомальгаут', 344.413, -29.622, 1.16],['Денеб', 310.358, 45.280, 1.25],
+  ['Мимоза', 191.930, -59.689, 1.25],  ['Регул', 152.093, 11.967, 1.35],
+  ['Адара', 104.656, -28.972, 1.50],   ['Кастор', 113.650, 31.888, 1.58],
+  ['Шаула', 263.402, -37.104, 1.62],   ['Гакрукс', 187.791, -57.113, 1.63],
+  ['Беллатрикс', 81.283, 6.350, 1.64], ['Элнат', 81.573, 28.608, 1.65],
+  ['Миаплацидус', 138.300, -69.717, 1.67],['Альнилам', 84.053, -1.202, 1.69],
+  ['Альнаир', 332.058, -46.961, 1.74], ['Альнитак', 85.190, -1.943, 1.77],
+  ['Алиот', 193.507, 55.960, 1.77],    ['Дубхе', 165.932, 61.751, 1.79],
+  ['Мирфак', 51.081, 49.861, 1.79],    ['Везен', 107.098, -26.393, 1.83],
+  ['Саргас', 264.330, -42.998, 1.86],  ['Каус Аустралис', 276.043, -34.385, 1.85],
+  ['Авиор', 125.628, -59.510, 1.86],   ['Алькаид', 206.885, 49.313, 1.86],
+  ['Менкалинан', 89.882, 44.947, 1.90],['Атрия', 252.166, -69.028, 1.91],
+  ['Альхена', 99.428, 16.399, 1.93],   ['Павлин', 306.412, -56.735, 1.94],
+  ['Мирзам', 95.674, -17.956, 1.98],   ['Полярная', 37.955, 89.264, 1.98],
+  ['Альфард', 141.897, -8.659, 1.98],  ['Хамаль', 31.793, 23.463, 2.00],
+  ['Альгиеба', 154.993, 19.842, 2.08], ['Дифда', 10.897, -17.987, 2.04],
+  ['Мицар', 200.981, 54.925, 2.23],    ['Нунки', 283.816, -26.297, 2.05]
+];
+
+// =================== Three.js ===================
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.1, 1000);
+const R = 50;
+
+function makeSprite(text, color, dotPx, showLabel) {
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 128;
+  const ctx = c.getContext('2d');
+  const cx = 128, cy = 48;
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, dotPx);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.35, color);
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(cx, cy, dotPx, 0, Math.PI*2); ctx.fill();
+  if (showLabel) {
+    ctx.font = 'bold 22px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = 'rgba(0,0,0,0.9)';
+    ctx.shadowBlur = 6;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(text, cx, 110);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.minFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false });
+  const s = new THREE.Sprite(mat);
+  s.scale.set(5, 2.5, 1);
+  return s;
+}
+
+// Звёзды
+const starSprites = [];
+for (const [name, ra, dec, mag] of STARS) {
+  const sz = Math.max(3, 9 - mag * 2);
+  const s = makeSprite(name, 'rgba(200,220,255,1)', sz, mag < 1.7);
+  s.userData = { ra, dec };
+  scene.add(s);
+  starSprites.push(s);
+}
+
+// Солнце и Луна
+const sunSprite = makeSprite('Солнце', 'rgba(255,220,100,1)', 14, true);
+sunSprite.scale.set(6, 3, 1);
+scene.add(sunSprite);
+
+const moonSprite = makeSprite('Луна', 'rgba(230,230,230,1)', 11, true);
+moonSprite.scale.set(6, 3, 1);
+scene.add(moonSprite);
+
+// Планеты
+const planetSprites = [];
+for (const p of PLANETS) {
+  const s = makeSprite(p.name, p.color, p.sz + 3, true);
+  s.userData = { planet: p };
+  scene.add(s);
+  planetSprites.push(s);
+}
+
+// Горизонт
+const hPts = [];
+for (let i = 0; i <= 90; i++) {
+  hPts.push(altAzToVec(0, (i/90)*360, R*0.999));
+}
+scene.add(new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints(hPts),
+  new THREE.LineBasicMaterial({ color: 0x4477cc, transparent: true, opacity: 0.5 })
+));
+
+// Компасные метки
+function makeCompass(text) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#aaccff';
+  ctx.font = 'bold 80px system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 8;
+  ctx.fillText(text, 64, 64);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(c), transparent: true, depthTest: false
+  }));
+  s.scale.set(4, 4, 1);
+  return s;
+}
+for (const [t, az] of [['С',0],['В',90],['Ю',180],['З',270]]) {
+  const s = makeCompass(t);
+  s.position.copy(altAzToVec(3, az, R * 0.95));
+  scene.add(s);
+}
+
+// =================== Ориентация устройства ===================
+let deviceQuat = new THREE.Quaternion();
+let orientationSet = false;
+let screenOrient = 0;
+let calibAngle = 0;
+
+function setDeviceQuat(alpha, beta, gamma) {
+  const zee = new THREE.Vector3(0, 0, 1);
+  const euler = new THREE.Euler();
+  const q0 = new THREE.Quaternion();
+  const q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+  euler.set(beta * RAD, alpha * RAD, -gamma * RAD, 'YXZ');
+  deviceQuat.setFromEuler(euler);
+  deviceQuat.multiply(q1);
+  deviceQuat.multiply(q0.setFromAxisAngle(zee, -screenOrient * RAD));
+  orientationSet = true;
+}
+
+function onOrient(e) {
+  if (e.alpha !== null) setDeviceQuat(e.alpha, e.beta, e.gamma);
+}
+window.addEventListener('deviceorientationabsolute', onOrient, true);
+window.addEventListener('deviceorientation', e => {
+  if (e.absolute === true || !orientationSet) onOrient(e);
+}, true);
+
+function updateScreenOrient() {
+  if (screen.orientation && screen.orientation.angle !== undefined) {
+    screenOrient = screen.orientation.angle;
+  } else if (window.orientation !== undefined) {
+    screenOrient = window.orientation === -90 ? 270 : (window.orientation || 0);
+  }
+}
+updateScreenOrient();
+window.addEventListener('orientationchange', updateScreenOrient);
+if (screen.orientation) screen.orientation.addEventListener('change', updateScreenOrient);
+
+// Калибровка
+const cal = document.getElementById('cal');
+const calVal = document.getElementById('calVal');
+cal.addEventListener('input', () => {
+  calibAngle = parseFloat(cal.value);
+  calVal.textContent = calibAngle;
+});
+
+// =================== Основной цикл ===================
+const infoEl = document.getElementById('info');
+let lastUpdate = 0;
+
+function skyUpdate() {
+  const now = Date.now();
+  if (now - lastUpdate < 1000) return;
+  lastUpdate = now;
+
+  const jd = julianDate(new Date());
+
+  // Звёзды
+  for (const s of starSprites) {
+    const { ra, dec } = s.userData;
+    const { alt, az } = radecToAltAz(ra, dec, lat, lon, jd);
+    s.visible = alt > -5;
+    s.position.copy(altAzToVec(alt, az, R));
+  }
+
+  // Солнце
+  {
+    const { ra, dec } = sunPosition(jd);
+    const { alt, az } = radecToAltAz(ra, dec, lat, lon, jd);
+    sunSprite.visible = alt > -5;
+    sunSprite.position.copy(altAzToVec(alt, az, R));
+  }
+
+  // Луна
+  {
+    const { ra, dec } = moonPosition(jd);
+    const { alt, az } = radecToAltAz(ra, dec, lat, lon, jd);
+    moonSprite.visible = alt > -5;
+    moonSprite.position.copy(altAzToVec(alt, az, R));
+  }
+
+  // Планеты
+  for (const s of planetSprites) {
+    const { ra, dec } = planetRAdec(s.userData.planet, jd);
+    const { alt, az } = radecToAltAz(ra, dec, lat, lon, jd);
+    s.visible = alt > -5;
+    s.position.copy(altAzToVec(alt, az, R));
+  }
+
+  // Инфо
+  const d = new Date();
+  infoEl.innerHTML =
+    `${d.toLocaleTimeString('ru-RU')} · ${d.toLocaleDateString('ru-RU')}<br>` +
+    `Широта: ${lat.toFixed(2)}° · Долгота: ${lon.toFixed(2)}°<br>` +
+    `Датчик: ${orientationSet ? '✓' : 'ожидание...'}`;
+}
+
+function animate() {
+  skyUpdate();
+  if (orientationSet) {
+    const calQ = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(0,1,0), calibAngle * RAD
+    );
+    camera.quaternion.copy(calQ).multiply(deviceQuat);
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// =================== Запуск ===================
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    const v = document.getElementById('video');
+    v.srcObject = stream;
+    await v.play();
+  } catch (e) {
+    console.warn('Камера недоступна:', e);
+  }
+}
+
+document.getElementById('startBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('startBtn');
+  btn.querySelector('.title').textContent = 'Запуск...';
+
+  // Разрешение на датчики (iOS 13+)
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try { await DeviceOrientationEvent.requestPermission(); }
+    catch (e) { console.warn('Датчики:', e); }
+  }
+
+  // Геолокация
+  try {
+    const pos = await new Promise((res, rej) =>
+      navigator.geolocation.getCurrentPosition(res, rej, { timeout: 6000 }));
+    lat = pos.coords.latitude;
+    lon = pos.coords.longitude;
+  } catch (e) { console.warn('Геолокация:', e); }
+
+  await startCamera();
+
+  btn.style.display = 'none';
+  document.getElementById('controls').style.display = 'block';
+  animate();
+});
+</script>
+</body>
+</html>
